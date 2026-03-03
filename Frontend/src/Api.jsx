@@ -1,6 +1,5 @@
 import axios from 'axios';
-const PROXY_URL = "https://cors-anywhere.herokuapp.com/";
-const BASE_URL = 'https://104.35.175.95:5000';
+import { BASE_URL } from './config/api.js';
 
 const GOOGLE_MAPS_API_KEY = 'AIzaSyAClGQYQDrnLDd8xxq0-9NIZGtaktlsqb4';
 

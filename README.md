@@ -1,26 +1,231 @@
-# SBHacks
+# NoFlame
 
 ## Table of Contents
 
-
-  - [Team Members](#team_members)
-  - [Usage](#usage)
+  - [Team Members](#team-members)
+  - [Deployment Guide](#deployment-guide)
   - [Inspiration](#inspiration)
-  - [What it does](#Purpose)
+  - [What it does](#purpose)
   - [Build Process](#build-process)
   - [Challenges](#challenges)
   - [Accomplishments](#accomplishments)
   - [What's next for NoFlame](#next-up)
 
 
-## Team Members:
+## Team Members
 
 Jason Boenjamin, Sneha Gurung, Falak Tulsi, Anna Lee
 
 
-## Usage
+## Deployment Guide
 
-INSERT LINK HERE
+NoFlame is deployed on **Oracle Cloud Infrastructure (OCI)** using Terraform. The backend runs on an Always Free compute instance and the frontend is served from OCI Object Storage.
+
+### Architecture
+
+```
+                         Oracle Cloud (OCI)
+  ┌──────────────────────────────────────────────────────────┐
+  │                                                          │
+  │   Object Storage Bucket          Compute Instance        │
+  │   ┌──────────────────┐       ┌────────────────────────┐  │
+  │   │  React/Vite App  │──────>│  Flask + Gunicorn      │  │
+  │   │  (Static Files)  │ :5001 │  TensorFlow ML Model   │  │
+  │   └──────────────────┘       │  Oracle Linux 8        │  │
+  │                              │  VM.Standard.E2.1.Micro│  │
+  │                              └────────────────────────┘  │
+  │                                                          │
+  │   VCN: 10.0.0.0/16  |  Ports: 80, 443, 5001, 22 (SSH)  │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Why Oracle Cloud?
+
+Oracle Cloud offers an **Always Free tier that never expires** (unlike AWS's 12-month free tier):
+
+| Resource | Always Free Limit |
+|----------|-------------------|
+| AMD Micro VMs | 2 instances (1/8 OCPU, 1GB RAM each) |
+| Block Storage | 200GB |
+| Object Storage | 20GB |
+| Outbound Data | 10TB/month |
+
+No auto-charges. You must manually upgrade to a paid account.
+
+### Prerequisites
+
+- [Terraform](https://developer.hashicorp.com/terraform/install) (`brew install terraform`)
+- [OCI CLI](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm) (`brew install oci-cli`)
+- [Node.js](https://nodejs.org/) (`brew install node`)
+- An [Oracle Cloud account](https://www.oracle.com/cloud/free/) (free signup, temporary $1 hold refunded)
+
+### Step 1: OCI Account and API Key
+
+1. Sign up at [oracle.com/cloud/free](https://www.oracle.com/cloud/free/)
+2. In [OCI Console](https://cloud.oracle.com), go to **Profile** > **User Settings** > **API Keys** > **Add API Key**
+3. Download the private key to `~/.oci/oci_api_key.pem`
+4. Note your Tenancy OCID, User OCID, and Fingerprint from the configuration preview
+
+```bash
+chmod 600 ~/.oci/oci_api_key.pem
+```
+
+### Step 2: Generate SSH Key
+
+```bash
+ssh-keygen -t ed25519 -C "noflame" -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub    # Copy this for terraform.tfvars
+curl ifconfig.me             # Get your IP for SSH access
+```
+
+### Step 3: Configure Terraform
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars
+```
+
+Edit `terraform.tfvars` with your OCI values:
+```hcl
+tenancy_ocid     = "ocid1.tenancy.oc1..xxxxx"
+user_ocid        = "ocid1.user.oc1..xxxxx"
+fingerprint      = "aa:bb:cc:dd:ee:ff:..."
+private_key_path = "~/.oci/oci_api_key.pem"
+region           = "us-sanjose-1"
+compartment_ocid = "ocid1.tenancy.oc1..xxxxx"   # Use tenancy OCID for root compartment
+
+ssh_public_key    = "ssh-ed25519 AAAAC3Nza... noflame"
+allowed_ssh_cidrs = ["YOUR_IP/32"]
+instance_shape    = "VM.Standard.E2.1.Micro"
+```
+
+> `terraform.tfvars` is gitignored — it contains credentials.
+
+### Step 4: Deploy Infrastructure
+
+```bash
+terraform init    # Download OCI provider
+terraform plan    # Preview resources
+terraform apply   # Deploy (type 'yes')
+```
+
+This creates: VCN, subnet, internet gateway, security list, object storage bucket, and a compute instance. The instance automatically runs `user_data.sh` on boot which installs Python 3.11, TensorFlow, Flask, and sets up a systemd service.
+
+Wait ~10-15 minutes for the bootstrap to complete. Monitor with:
+```bash
+ssh opc@BACKEND_IP 'tail -f /var/log/user-data.log'
+```
+
+### Step 5: Deploy Backend
+
+```bash
+scp Backend/app.py opc@BACKEND_IP:/opt/noflame/
+scp Backend/wildfire_detection_model.h5 opc@BACKEND_IP:/opt/noflame/
+scp Backend/unchecked_camera_image/image.jpeg opc@BACKEND_IP:/opt/noflame/unchecked_camera_image/
+
+ssh opc@BACKEND_IP 'sudo systemctl start noflame'
+```
+
+### Step 6: Configure Frontend
+
+Create `Frontend/vite-project/.env`:
+```bash
+VITE_API_URL=http://BACKEND_IP:5001
+```
+
+Run locally:
+```bash
+cd Frontend/vite-project
+npm install
+npm run dev    # Opens at http://localhost:5173
+```
+
+Or build and deploy to OCI Object Storage:
+```bash
+npm run build
+oci os object bulk-upload \
+  --bucket-name $(cd ../../infra && terraform output -raw frontend_bucket_name) \
+  --src-dir dist --overwrite
+```
+
+### Step 7: Test
+
+```bash
+# Backend health check
+curl http://BACKEND_IP:5001/fireAlarm
+# Returns: false
+
+# Weather data (San Francisco)
+curl "http://BACKEND_IP:5001/getCurrentForecastFromLatLon?lat=37.7749&lon=-122.4194"
+# Returns: JSON with temperature, humidity, wind data
+```
+
+Open the frontend in your browser and **allow location access** when prompted.
+
+### API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/fireAlarm` | GET | Fire alarm status (true/false) |
+| `/getCurrentForecastFromLatLon?lat=X&lon=X` | GET | Current weather for location |
+| `/getFullForecastFromLatLon?lat=X&lon=X` | GET | Full hourly forecast |
+| `/getFireRisk?lat=X&lon=X` | GET | Fire risk score (0-100) |
+| `/upload_image` | POST | Upload camera image for ML analysis |
+
+### Code Changes Made
+
+**Frontend API URL** — Changed from hardcoded IP to environment-based config:
+- Created `Frontend/vite-project/src/config/api.js` — reads `VITE_API_URL` from `.env`, falls back to `http://localhost:5001`
+- Updated `Frontend/vite-project/src/Api.jsx` — imports `BASE_URL` from config instead of hardcoding
+- Created `Frontend/vite-project/.env.example` — template for environment variables
+
+**Infrastructure** — All Terraform files in `infra/` rewritten from AWS to Oracle Cloud:
+- `providers.tf` — OCI provider authentication
+- `main.tf` — VCN, subnet, security list, compute instance, object storage bucket
+- `variables.tf` — OCI-specific variables (tenancy, user, fingerprint, etc.)
+- `versions.tf` — `oracle/oci ~> 5.0` provider
+- `outputs.tf` — Backend IP/URL, frontend URL, deployment commands
+- `user_data.sh` — Oracle Linux 8 bootstrap (Python 3.11, TensorFlow, Gunicorn, 2GB swap)
+
+**Instance shape change** — Ampere A1 Flex had no capacity in us-sanjose-1, switched to `VM.Standard.E2.1.Micro` (AMD). Added dynamic `shape_config` in `main.tf` so it works with both Flex and fixed shapes.
+
+**Swap space** — Added 2GB swap creation to `user_data.sh` to prevent out-of-memory errors when installing TensorFlow on the 1GB Micro instance.
+
+### Terraform File Structure
+
+```
+infra/
+├── main.tf                  # VCN, compute, object storage resources
+├── variables.tf             # Input variables (OCI auth, project config)
+├── outputs.tf               # Deployment URLs and next-step commands
+├── providers.tf             # OCI provider config
+├── versions.tf              # Terraform >= 1.0.0, oracle/oci ~> 5.0
+├── user_data.sh             # Instance bootstrap script
+├── terraform.tfvars.example # Template (copy to terraform.tfvars)
+├── terraform.tfvars         # Your values (gitignored)
+└── .gitignore               # Ignores tfvars, tfstate, .terraform/
+```
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Out of host capacity" for A1 shape | Switch to `VM.Standard.E2.1.Micro` in terraform.tfvars |
+| Instance OOM during pip install | Swap should be created by user_data.sh. Verify: `ssh opc@IP 'free -h'` |
+| SSH connection refused | Wait 1-2 min after instance launch for SSH to start |
+| user_data.sh failed at firewall-cmd | Run firewall commands manually via SSH (see `infra/README.md`) |
+| Frontend shows "Unable to fetch" | Allow browser location permission, check backend is running |
+| Google Maps "Oops! Something went wrong" | Configure API key referrer restrictions in Google Cloud Console |
+| Backend 500 errors | Check logs: `ssh opc@IP 'sudo journalctl -u noflame -n 50'` |
+
+### Teardown
+
+```bash
+cd infra
+terraform destroy   # Type 'yes' — removes all OCI resources
+```
+
+### Cost: $0/month (Always Free forever)
 
 
 ## Inspiration

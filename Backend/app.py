@@ -137,5 +137,15 @@ def upload_image():
 
 
 if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=443, ssl_context=('/etc/ssl/certs/myserver/myserver.crt', '/etc/ssl/certs/myserver.key'))
+    import os
+    # Use SSL only if certificates exist (production), otherwise run without SSL (local dev)
+    cert_path = '/etc/ssl/certs/myserver/myserver.crt'
+    key_path = '/etc/ssl/certs/myserver/myserver.key'
+
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        # Production: HTTPS on port 443
+        app.run(debug=True, host='0.0.0.0', port=443, ssl_context=(cert_path, key_path))
+    else:
+        # Local development: HTTP on port 5001 (5000 is used by AirPlay on macOS)
+        app.run(debug=True, host='0.0.0.0', port=5001)
 

@@ -1,0 +1,19 @@
+# OCI / Oracle Cloud credentials
+*.pem
+.oci/
+
+# Environment files with secrets
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+
+# Build output
+dist/
+build/
+
+# OS files
+.DS_Store
+Thumbs.db
